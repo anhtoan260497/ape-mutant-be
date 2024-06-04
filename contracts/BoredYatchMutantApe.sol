@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
-import "@chainlink/contracts/src/v0.8/VRFConsumerBaseV2.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "hardhat/console.sol";
@@ -18,8 +18,7 @@ error BoreYatchMutantApe__WidthdrawFailed();
 
 contract BoreYatchMutantApe is
     ERC721URIStorage,
-    VRFConsumerBaseV2,
-    Ownable,
+    VRFConsumerBaseV2Plus,
     ReentrancyGuard
 {
     event requestIdToSender(uint256 indexed requestId, address indexed sender);
@@ -30,13 +29,12 @@ contract BoreYatchMutantApe is
     );
 
     // vrf
-    VRFCoordinatorV2Interface i_vrfCoordinator;
     address vrfCoordinator = getVRFCoordinator();
     uint32 internal constant NUM_WORDS = 1;
     uint16 internal constant REQUEST_CONFIRMATIONS = 3;
     uint32 internal immutable i_callbackGasLimit;
     bytes32 private immutable i_keyHash;
-    uint64 private immutable i_subId;
+    uint256 immutable i_subId;
 
     // vrf helper
     mapping(uint256 => address) public s_requestIdToSender;
@@ -55,18 +53,15 @@ contract BoreYatchMutantApe is
         uint256 _mintFee,
         bytes32 _keyHash,
         uint32 _callbackGasLimit,
-        uint64 _subId,
+        uint256 _subId,
         string[5] memory _tokenURIs
     )
         ERC721("BoredYatchMutantApe", "BYMA")
-        VRFConsumerBaseV2(vrfCoordinator)
-        Ownable()
+        VRFConsumerBaseV2Plus(vrfCoordinator)
     {
-        i_vrfCoordinator = VRFCoordinatorV2Interface(vrfCoordinator);
         i_callbackGasLimit = _callbackGasLimit;
         i_keyHash = _keyHash;
         i_subId = _subId;
-
         i_mintFee = _mintFee;
         s_tokenCounter = 0;
         _initialzedContract(_tokenURIs);
@@ -87,19 +82,27 @@ contract BoreYatchMutantApe is
             return 0x6A2AAd07396B36Fe02a22b33cf443582f682c82f;
         } else if (block.chainid == 56) {
             return 0xc587d9053cd1118f25F645F9E08BB98c9712A4EE;
+        } else if (block.chainid == 31337) {
+            return 0x8103B0A8A00be2DDC778e6e7eaa21791Cd364625;
         } else revert BoreYatchMutantApe__ChainNotSupported();
     }
 
     function getRandomNumber() external payable returns (uint256 _requestId) {
-        if(MAX_CHANCE_VALUE < s_tokenCounter) revert BoreYatchMutantApe__MaximumTokenExceed();
+        if (TOTAL_NFTS < s_tokenCounter)
+            revert BoreYatchMutantApe__MaximumTokenExceed();
         if (msg.value < i_mintFee)
             revert BoreYatchMutantApe__NotEnoughFeeToMint();
-        _requestId = i_vrfCoordinator.requestRandomWords(
-            i_keyHash,
-            i_subId,
-            REQUEST_CONFIRMATIONS,
-            i_callbackGasLimit,
-            NUM_WORDS
+        _requestId = s_vrfCoordinator.requestRandomWords(
+            VRFV2PlusClient.RandomWordsRequest({
+                keyHash: i_keyHash,
+                callbackGasLimit: i_callbackGasLimit,
+                numWords: NUM_WORDS,
+                subId: i_subId,
+                requestConfirmations: REQUEST_CONFIRMATIONS,
+                extraArgs: VRFV2PlusClient._argsToBytes(
+                    VRFV2PlusClient.ExtraArgsV1({nativePayment: true})
+                )
+            })
         );
 
         s_requestIdToSender[_requestId] = msg.sender;
@@ -107,13 +110,13 @@ contract BoreYatchMutantApe is
     }
 
     function fulfillRandomWords(
-        uint256 _requestId,
-        uint256[] memory _randomWords
+        uint256 requestId,
+        uint256[] calldata randomWords
     ) internal override {
-        address sender = s_requestIdToSender[_requestId];
+        address sender = s_requestIdToSender[requestId];
         uint256 newItemId = s_tokenCounter;
         s_tokenCounter++;
-        uint256 number = _randomWords[0] % MAX_CHANCE_VALUE;
+        uint256 number = randomWords[0] % MAX_CHANCE_VALUE;
         console.log(number);
         uint8 index = getTokenUriIndex(number);
         s_rareAmount[index]++;
@@ -142,27 +145,56 @@ contract BoreYatchMutantApe is
 
     function calculateToken(uint8 _index) internal view returns (uint8) {
         uint8[5] memory chanceArray = getChanceArray();
-        if (_index > chanceArray.length - 1)
+        if (_index > chanceArray.length - 1 || _index < 0)
             revert BoreYatchMutantApe__IndexExceedTokenUri();
         uint256 currentAmount = s_rareAmount[_index];
         uint256 maxAmount = (TOTAL_NFTS * (chanceArray[_index] * 100)) /
             denominator; // basis point
+
         if (currentAmount < maxAmount) {
             return _index;
-        } else {
-            calculateToken(_index++);
         }
 
-        revert BoreYatchMutantApe__TokenNotAvailable();
+        if (currentAmount >= maxAmount) {
+            for (uint8 i = _index; i < chanceArray.length; i++) {
+                uint256 currentAmountIncrease = s_rareAmount[i];
+                uint256 maxAmountIncrease = (TOTAL_NFTS *
+                    (chanceArray[i] * 100)) / denominator; // basis point
+                if (currentAmountIncrease < maxAmountIncrease) {
+                    return i;
+                }
+            }
+
+            for (uint8 i = _index; i > 0; i--) {
+                uint256 currentAmountDecrease = s_rareAmount[i];
+                uint256 maxAmountDecrease = (TOTAL_NFTS *
+                    (chanceArray[i] * 100)) / denominator; // basis point
+                if (currentAmountDecrease < maxAmountDecrease) {
+                    return i;
+                }
+            }
+        }
+
+        revert BoreYatchMutantApe__IndexExceedTokenUri();
+
+        // uint256 maxAmount = (TOTAL_NFTS * (chanceArray[_index] * 100)) /
+        //     denominator; // basis point
+        // if (currentAmount < maxAmount) {
+        //     return _index;
+        // } else {
+        //     if() {
+        //         calculateToken(_index++);
+        //     }
+        // }
     }
 
     function widthdraw() external onlyOwner nonReentrant {
-        uint256 amount  =  address(this).balance;
+        uint256 amount = address(this).balance;
         (bool success, ) = payable(msg.sender).call{value: amount}("");
-        if(!success)revert BoreYatchMutantApe__WidthdrawFailed();
+        if (!success) revert BoreYatchMutantApe__WidthdrawFailed();
     }
 
-    function getMintFee() external view returns(uint256) {
+    function getMintFee() external view returns (uint256) {
         return i_mintFee;
     }
 
