@@ -10,7 +10,7 @@ const VrfCoordinatorV2MockDeploy:DeployFunction = async (hre:HardhatRuntimeEnvir
     const {deployer} = await getNamedAccounts()
     const chainId = hre.network.config.chainId
 
-    if(chainId === 31337) return
+    if(chainId !== 31337) return
     
     log('------------------------------------')
     log('Deploying VRF Coordinator...')
