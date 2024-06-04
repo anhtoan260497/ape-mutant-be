@@ -41,11 +41,12 @@ const pinataUrisUpload = async () => {
         }
 
         const resJSON = await pinata.pinJSONToIPFS(metaData)
-        tokenUris.push(resJSON.IpfsHash)
+        tokenUris.push(`ipfs://${resJSON.IpfsHash}`)
         rare++
     }
 
     return tokenUris
 }
 
-pinataUrisUpload()
+
+export default pinataUrisUpload
